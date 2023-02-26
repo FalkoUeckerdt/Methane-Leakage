@@ -1,0 +1,280 @@
+---
+title: "Calculating methane leakage rates"
+author: "Falko Ueckerdt"
+output: Figure of methane leakage rates across countries (including major producers)
+---
+
+Attaching required libraries.
+```{r libraries}
+
+library(ggplot2)
+library(dplyr)
+library(readxl)
+library(quitte)#https://github.com/pik-piam/quitte
+
+```
+
+Reading in JODI data
+```{r gas production data from JODI database}
+
+selected_year = "2021"
+data_file = "input_data/STAGING_world_NewFormat_Feb2023.csv"#download from https://www.jodidata.org/gas/database/data-downloads.aspx
+
+gas_production_data <- read.csv(data_file, skip = 0, header = T, stringsAsFactors = F, sep = ',')
+names(gas_production_data)[6]="value"
+names(gas_production_data)[5]="unit"
+names(gas_production_data)[4]="variable"
+#names(gas_production_data)[1]="region"
+
+df.gas_production = as.quitte(gas_production_data)
+
+# filter out countries that have a very low production share (compared to imports). Production (not consumption) is in the denominator of the calculated methane leakage rates. We only assess major producers.
+maximum_production_rel_to_import = 0.1 # to be filtered out as we want to calculate leakage rates of production
+
+tmp = df.gas_production %>% filter(unit== "M3") %>% group_by(model,scenario,region,variable,unit,period,ref_area, energy_product) %>% summarize(sum_value = sum(value))
+tmp2 = tmp %>% spread(variable,sum_value)
+tmp3 = tmp2 %>% mutate(production_ratio = INDPROD/TOTIMPSB)
+tmp3 = tmp3 %>% select(ref_area,TOTIMPSB, INDPROD, production_ratio)
+tmp4 = tmp3[order(tmp3$production_ratio),]
+countries_low_production_CODES = unique(tmp4[tmp4$production_ratio<maximum_production_rel_to_import,]$ref_area)
+
+#select data for 2021, and only the INDPROD "industrial production" data
+df.gas_production = df.gas_production %>% filter(variable=="INDPROD" & grepl(selected_year,time_period ))
+df.gas_production$period = selected_year# typically most recent: 2021
+
+# some data is only given in M3 --> expand to TJ
+  # calculating a mean conversion factor from TJ to M3.
+      tmp_M3 = df.gas_production %>% filter(unit=="M3")
+      names(tmp_M3)[11] = "value_M3"
+      tmp_TJ = df.gas_production %>% filter(unit=="TJ")
+      names(tmp_TJ)[11] = "value_TJ"
+      tmp_joined = inner_join(tmp_M3,tmp_TJ,by=c("model","scenario","region","variable","period","ref_area","time_period","energy_product","assessment_code"))
+      tmp_joined = tmp_joined %>% mutate(relation = value_TJ/value_M3)
+      #hist(unique(tmp_joined$relation), breaks = 40)#plot
+TJ_per_M3 = mean(na.omit(tmp_joined$relation))
+
+# unit conversion 
+ tmp_M3 = df.gas_production %>% filter(unit=="M3")
+ #  tmp_M3 = tmp_M3 %>% select(-value)
+ tmp_TJ = df.gas_production %>% filter(unit=="TJ")
+# tmp_TJ = tmp_TJ %>% select(-value,-unit)
+ tmp_joined_full = full_join(tmp_M3,tmp_TJ,by=c("model","scenario","region","variable","period","ref_area","time_period","energy_product","assessment_code"))
+      #correcting a data error
+       tmp_joined_full[tmp_joined_full$ref_area=="TT",]$assessment_code = 1
+ tmp_joined_full_TJmissing <- tmp_joined_full[is.na(tmp_joined_full$value.y),]
+ tmp_joined_full_TJ = tmp_joined_full_TJmissing %>% mutate(value = value.x * TJ_per_M3, unit = "TJ")
+ tmp_joined_full_TJ = tmp_joined_full_TJ %>% select(-unit.y, -value.y, -value.x, -unit.x)
+ df.gas_production = rbind(df.gas_production,tmp_joined_full_TJ)
+
+```
+
+Reading in IEA data
+```{r IEA absolute methane leakage data}
+# IEA: methane leakage absolute data (does not include relative intensities or methane leakage rates)
+selected_year_IEA = "2021"
+data_file_leakage = "input_data/IEA-methane-comparison-data-source=IEA_edited.csv"# I had to cut columns that were not filled
+gas_leakage_data <- read.csv(data_file_leakage, skip = 0, header = T, stringsAsFactors = F, sep = ';')
+gas_leakage_data = gas_leakage_data %>% mutate(country = toupper(country))
+
+#gas_leakage_data_TMP
+gas_leakage_data_TMP =gas_leakage_data
+
+gas_sources = unique(gas_leakage_data_TMP$segment)
+gas_sources = gas_sources[grepl("gas",gas_sources)|grepl("Gas",gas_sources)]
+gas_sources =c(gas_sources,"Satellite-detected large leaks")
+
+# IEA data from figure, as a point of comparison
+data_file = "input_data/IEA_methane_intensity.csv"#IEA data 2021, numbers read out from a figure
+IEA_methane_intensity_data <- read.csv(data_file, skip = 1, header = T, stringsAsFactors = F, sep = ';')
+
+```
+
+Geografical mapping
+```{r geografical mapping}
+
+#Harmonizing country identifyer of IEA and JODI data
+national_codes = "input_data/all_country_iso_codes.csv"
+national_codes_data <- read.csv(national_codes, skip = 0, header = T, stringsAsFactors = F, sep = ',')
+
+countries_IEA = toupper(unique(gas_leakage_data$country))
+countries_CODE = unique(national_codes_data$name)
+  countries_CODE = toupper(countries_CODE)
+national_codes_data$name = toupper(national_codes_data$name)
+
+#most country names are identical
+gas_leakage_data.identical = gas_leakage_data %>% filter(country %in% countries_CODE)
+countries_match_IEA = unique(gas_leakage_data.identical$country)
+missing_countries = setdiff(countries_IEA,countries_match_IEA)
+tmp3 = gas_leakage_data.identical %>% rowwise() %>% mutate(country_code_name = countries_CODE[(country == countries_CODE)])#
+tmp4 = tmp3 %>% select(country,country_code_name)
+tmp5 = unique(tmp4)
+
+# some countries require manual editing.
+df.missing_IEA_countries  = data.frame(missing_countries)
+df.missing_IEA_countries$ISO_match = NA
+df.missing_IEA_countries[df.missing_IEA_countries$missing_countries == "UNITED STATES",]$ISO_match = "UNITED STATES OF AMERICA"
+df.missing_IEA_countries[df.missing_IEA_countries$missing_countries == "RUSSIA",]$ISO_match = "RUSSIAN FEDERATION"
+df.missing_IEA_countries[df.missing_IEA_countries$missing_countries == "UNITED KINGDOM",]$ISO_match = "UNITED KINGDOM OF GREAT BRITAIN AND NORTHERN IRELAND"
+df.missing_IEA_countries[df.missing_IEA_countries$missing_countries == "IRAN",]$ISO_match = toupper("Iran (Islamic Republic of)")
+
+df.manual = df.missing_IEA_countries %>% filter(ISO_match != "NA")
+missing_countries = setdiff(countries_IEA,c(countries_match_IEA,df.manual$missing_countries))#update missing countries
+# replace manual matches
+df.part1 = gas_leakage_data %>% filter(country %in% df.manual$missing_countries) %>%  rowwise() %>% mutate(country = df.manual[(country == df.manual),2])
+df.part2 = gas_leakage_data %>% filter(country %in% countries_match_IEA)# those that were identical
+df.part3 = gas_leakage_data %>% filter(!(country %in% c(countries_match_IEA,df.manual$missing_countries)))#all other data that could not be harmonized
+
+# Global leakage values are part of IEA data (in df.part3 -> extracting them.)
+df.gas_leakage_data.global = df.part3 %>% filter(region == "World") %>% mutate(country = "World")
+df.gas_leakage_data.global$country_ISO = "World"
+
+gas_leakage_data = rbind(df.part1,df.part2)
+# add ISO code country name. and alpha.2 ISO code
+
+tmp = gas_leakage_data %>% rowwise() %>% mutate(country_ISO = national_codes_data[(country == national_codes_data$name),2])
+gas_leakage_data = tmp
+
+gas_leakage_data = rbind(gas_leakage_data,df.gas_leakage_data.global)
+
+names(gas_leakage_data)[3] = "value"
+gas_leakage_data = as.quitte(gas_leakage_data)
+gas_leakage_data$unit = "kt CH4/year"
+gas_leakage_data$variable = "annual methane leakage"
+
+# check countries in df.gas_production
+countries_JODI = unique(df.gas_production$ref_area)
+countries_IEA_codes = unique(gas_leakage_data$country_iso)
+test1 = setdiff(countries_JODI,national_codes_data$alpha.2)# if empty then all countries are in country code list
+test2 = setdiff(countries_IEA_codes,countries_JODI)# more countries in IEA than in JODI
+test3 = intersect(countries_JODI,countries_IEA_codes)# both list have overlapp of 42 countries
+
+```
+
+Aggregating leakage data for selected leakage sources
+```{r Data In}
+#filter leakage associated with natural gas production (extraction and transport)
+
+satelite = "with" # "with" --> "Satellite-detected large leaks" to be included.
+gas_sources = unique(gas_leakage_data$segment)
+gas_sources = gas_sources[grepl("gas",gas_sources)|grepl("Gas",gas_sources)]
+
+if (satelite=="with"){# include large leaks
+ gas_sources =c(gas_sources,"Satellite-detected large leaks")
+}
+
+gas_leakage_data.selected = gas_leakage_data %>% filter(baseyear==2021, segment %in% gas_sources)
+gas_leakage_data.selected.reduced = gas_leakage_data.selected %>% group_by(region,country,baseyear,country_iso,unit,variable) %>% summarize(sum_gas_leakage = sum(value))
+# converting into TJ
+
+methane_density_Tj_per_kt = 55 # MJ/kg = GJ/t = TJ/kt
+gas_leakage_data.selected.reduced = gas_leakage_data.selected.reduced %>% mutate(sum_gas_leakage = sum_gas_leakage*methane_density_Tj_per_kt)
+gas_leakage_data.selected.reduced$unit = "TJ CH4/year"
+
+# filter: aggregating monthly to annual values (summarize)
+df.gas_production.annual = df.gas_production %>% filter(unit=="TJ") %>% group_by(model,scenario,region,variable,unit,period,ref_area,energy_product,assessment_code) %>% summarize(sum_gas_production = sum(value))
+
+names(df.gas_production.annual)[which(names(df.gas_production.annual)=="ref_area")]="country_iso"
+
+# Calculating a GLOBAL average value for methane leakage rates
+  # option 1. summing JODI data.
+    #sum(df.gas_production.annual[df.gas_production.annual$country_iso!="World" & df.gas_production.annual$variable=="INDPROD",]$sum_gas_production)
+    # careful: some countries are missing, so this aggregated production value is too small (by roughly 10%) and derived global leakage rates can be too high.
+  # Option 2. Using the global production number reported in the BP Statistical Review of World Energy 2022
+  # https://www.bp.com/content/dam/bp/business-sites/en/global/corporate/pdfs/energy-economics/statistical-review/bp-stats-review-2022-full-report.pdf
+  gas.production.global = 145.33 #EJ, natural gas production, global
+  tmp.glob = df.gas_production.annual[1,]
+  tmp.glob$sum_gas_production = gas.production.global*10^6 #TJ in 2021. calculated from IEA data (and BP=)
+  tmp.glob$country_iso = "World"
+
+# Adding TURKMENISTAN (as it is the only top NG producer that is not explicitly included in the JODI database)
+  gas.production.TURKMENISTAN = 2.85 #EJ, natural gas production, TURKMENISTAN
+  # https://www.bp.com/content/dam/bp/business-sites/en/global/corporate/pdfs/energy-economics/statistical-review/bp-stats-review-2022-full-report.pdf
+  tmp.TURKMENISTAN = df.gas_production.annual[1,]
+  tmp.TURKMENISTAN$sum_gas_production = gas.production.TURKMENISTAN*10^6 #TJ in 2021. calculated from IEA data (and BP=)
+  tmp.TURKMENISTAN$country_iso = "TM"#"TM"
+
+df.gas_production.annual = rbind(df.gas_production.annual,tmp.glob,tmp.TURKMENISTAN)
+
+```
+
+Processing data
+```{r Merging the JODI and IEA country data}
+
+df.joined = inner_join(gas_leakage_data.selected.reduced,df.gas_production.annual,by="country_iso")
+  #save = inner_join(gas_leakage_data.selected.reduced,df.gas_production.annual,by="country_iso")
+df.joined = df.joined %>% mutate(leakage_rate = sum_gas_leakage/sum_gas_production)
+df.joined = df.joined %>% select(country,country_iso, leakage_rate,sum_gas_leakage,sum_gas_production)
+df.joined = df.joined %>% filter(leakage_rate != Inf)
+
+df.joined$leakage_rate = df.joined$leakage_rate*100
+
+final_countries = df.joined$country
+final_countries_iso = df.joined$country_iso
+
+  JODI_final = df.gas_production.annual$country_iso
+  IEA_final = gas_leakage_data.selected.reduced$country_iso
+  countries_lost_when_merging_data =  setdiff(c(JODI_final,IEA_final),final_countries_iso)
+  JODI_countries_lost_when_merging_data =  setdiff(c(JODI_final),final_countries_iso)
+  IEA_countries_lost_when_merging_data =  setdiff(c(IEA_final),final_countries_iso)
+countries_lost_when_translating_IEA = unique(df.part3$country)
+
+```
+
+Plotting data - with 2nd y axis
+```{r plotting}
+
+bb <- c(1e+05, 1e+06,5e+06,1e+07,2e+07,3e+07) # define breaks in plot.
+#rename
+df.joined[df.joined$country=="UNITED KINGDOM OF GREAT BRITAIN AND NORTHERN IRELAND",]$country="UNITED KINGDOM"
+# filter out countries with low production share
+  df.joined = df.joined %>% filter(!(country_iso %in% c(countries_low_production_CODES,"ZA")))
+  
+df.joined = df.joined[order(df.joined$leakage_rate),]
+your_order <- order(df.joined$leakage_rate)
+df.joined$country <- factor(df.joined$country, levels = df.joined$country[your_order])
+
+df.joined = df.joined %>% mutate(IEA_leakage_rate = NA)
+df.joined$source = "own analysis"
+  IEA_methane_intensity_data.tmp = IEA_methane_intensity_data
+  names(IEA_methane_intensity_data.tmp)[2]="leakage_rate"
+  IEA_methane_intensity_data.tmp = IEA_methane_intensity_data.tmp %>% mutate(leakage_rate = leakage_rate/(1/methane_density_Tj_per_kt*1000/100))
+for (country_selected in IEA_methane_intensity_data.tmp$country){
+  IEA_leakage_rate_selected = IEA_methane_intensity_data.tmp[IEA_methane_intensity_data.tmp$country==country_selected,]$leakage_rate
+  df.joined = df.joined %>% mutate(IEA_leakage_rate = ifelse(country==country_selected,IEA_leakage_rate_selected,IEA_leakage_rate))
+  df.joined = df.joined %>% mutate(source = ifelse(country==country_selected,"IEA methane intensity figure",source))
+}
+  
+plot_combined = ggplot()+geom_point(data=df.joined %>% filter(leakage_rate < 15),aes(x=country,y=leakage_rate,size = sum_gas_leakage), color="red", shape=16)+geom_point(data=df.joined %>% filter(leakage_rate < 15),aes(x=country,y=leakage_rate,size = sum_gas_production), shape=1)+geom_point(data=df.joined %>% filter(leakage_rate < 15),aes(x=country,y=IEA_leakage_rate, shape = source,alpha = source),size=3)+
+   theme_bw() +
+#  guides(shape = guide_legend(title = "Title"))+
+  theme(axis.text.x = element_text(angle = 45))+xlab("Natural gas producing country")+ylab("Methane leakage rate (%)")+ggtitle("Regional heterogeneity of methane leakage rates")+ scale_size_continuous(name="Natural gas production (black circles) [TJ]\nmethane emissions (red filled circles) [TJ]",
+                          breaks = bb,
+                         # limits = c(.05, .4),
+                        #  labels = ll,
+                         range = c(1, 22)#15 without world
+      )+
+  #scale_color_manual(labels = c("IEA data"), values = c("black"))+
+  scale_shape_manual(name= "Comparing the intensity data (right axis)",labels = c("IEA intensity data (for oil&gas production)","Own analysis (for gas production)"), values = c(4,16))+
+  scale_alpha_manual(labels = c("IEA intensity data (for oil&gas production)","Own analysis (for gas production)"), values = c(1,0))+
+  guides(alpha = "none")+
+   scale_y_continuous(
+    # Features of the first axis
+    name = "Methane leakage rate (%)",
+    # Add a second axis and specify its features
+    sec.axis = sec_axis( trans=~.*(1/methane_density_Tj_per_kt*1000/100), name="Intensity (kg methane leakage/GJ fossil production)"),
+    breaks=seq(0,20,1)
+  )
+
+print(plot_combined)
+ggsave(filename = paste0("output_data/methane_leakage_rates.png"),
+       width = 40, height = 20, units = "cm")
+
+#save plotting data in file
+df.joined = df.joined %>% mutate(IEA_intensity_data = IEA_leakage_rate*(1/methane_density_Tj_per_kt*1000/100),Own_intensity_data=leakage_rate*(1/methane_density_Tj_per_kt*1000/100)) %>% select(-IEA_leakage_rate)#adding intensity data columns (these have been calculated above when plotting the 2nd y axis)
+save_data_file = "output_data/plot_data.csv"
+file <- file(save_data_file)
+writeLines(paste("# Own calculation of methane leakage rates based on IEA and JODI data. Leakage rates unit is %. Absolute gas volumes for leakage and production are given in TJ. Methane leakage intensities are given in kg methane/GJ"), file)
+close(file)
+write.table(df.joined, save_data_file, append = TRUE, col.names = TRUE,sep=",", row.names = FALSE)
+
+```
